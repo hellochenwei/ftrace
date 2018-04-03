@@ -1,0 +1,208 @@
+diff --git a/arch/Kconfig b/arch/Kconfig
+index c484676..6fe6f6c 100644
+--- a/arch/Kconfig
++++ b/arch/Kconfig
+@@ -1,6 +1,10 @@
+ #
+ # General architecture dependent options
+ #
++config MOST
++    bool "Enable Mobile Storage Analyzer (MOST)"
++	default n
++	depends on BLK_DEV_IO_TRACE
+ 
+ config OPROFILE
+ 	tristate "OProfile system profiling"
+diff --git a/arch/arm64/configs/msmcortex-perf-blaze_defconfig b/arch/arm64/configs/msmcortex-perf-blaze_defconfig
+index 3427014..328a186d 100644
+--- a/arch/arm64/configs/msmcortex-perf-blaze_defconfig
++++ b/arch/arm64/configs/msmcortex-perf-blaze_defconfig
+@@ -675,8 +675,23 @@ CONFIG_F2FS_FS=y
+ CONFIG_F2FS_FS_SECURITY=y
+ CONFIG_F2FS_XATTR=y
+ CONFIG_F2FS_STAT_FS=y
+-CONFIG_F2FS_FS_ENCRYPTION=y
++CONFIG_F2FS_FS_ENCRYPTION=n
+ CONFIG_FS_ENCRYPTION=y
++CONFIG_MOST=y
+ #chenwei add to add f2fs end
+ CONFIG_VENDOR_VLOG=y
+ #add for the vendor log
++
++#trace
++CONFIG_BLK_DEV_IO_TRACE=y
++CONFIG_TRACING_SUPPORT=y
++CONFIG_FTRACE=y
++CONFIG_SYSFS=y
++CONFIG_BLOCK=y
++CONFIG_RELY=y
++CONFIG_DEBUG_FS=y
++CONFIG_TRACEPOINTS=y
++CONFIG_GENERIC_TRACE=y
++CONFIG_STACKTRACE=y
++CONFIG_F2FS_IO_TRACE=y
++CONFIG_FUNCTION_TRACER=y
+diff --git a/block/blk-core.c b/block/blk-core.c
+old mode 100644
+new mode 100755
+diff --git a/fs/f2fs/data.c b/fs/f2fs/data.c
+old mode 100644
+new mode 100755
+index 4bc97ba..8707161
+--- a/fs/f2fs/data.c
++++ b/fs/f2fs/data.c
+@@ -220,6 +220,7 @@ static inline void __submit_bio(struct f2fs_sb_info *sbi,
+ 		if (type == NODE)
+ 			set_sbi_flag(sbi, SBI_NEED_CP);
+ 	}
++	
+ submit_io:
+ 	if (is_read_io(bio_op(bio)))
+ 		trace_f2fs_submit_read_bio(sbi->sb, type, bio);
+@@ -417,6 +418,8 @@ next:
+ 
+ 	bio_page = fio->encrypted_page ? fio->encrypted_page : fio->page;
+ 
++	printk (KERN_ERR "chenwei %p \n", fio->encrypted_page);
++
+ 	/* set submitted = 1 as a return value */
+ 	fio->submitted = 1;
+ 
+diff --git a/include/trace/events/f2fs.h b/include/trace/events/f2fs.h
+old mode 100644
+new mode 100755
+diff --git a/kernel/trace/blktrace.c b/kernel/trace/blktrace.c
+old mode 100644
+new mode 100755
+index 5d7e2ca..391a900
+--- a/kernel/trace/blktrace.c
++++ b/kernel/trace/blktrace.c
+@@ -34,6 +34,16 @@
+ 
+ #ifdef CONFIG_BLK_DEV_IO_TRACE
+ 
++#ifdef CONFIG_MOST
++struct blk_remap_table {
++	struct blk_io_trace_remap bitr;
++	unsigned long ino;
++	unsigned char name[128];
++};
++struct blk_remap_table gbrt;
++#endif
++
++
+ static unsigned int blktrace_seq __read_mostly = 1;
+ 
+ static struct trace_array *blk_tr;
+@@ -961,9 +971,58 @@ static void blk_add_trace_bio_remap(void *ignore,
+ 	    bio->bi_io_vec->bv_page->tsk_dirty)
+ 		tsk = bio->bi_io_vec->bv_page->tsk_dirty;
+ 
++#ifdef CONFIG_MOST
++	if (bio_has_data(bio) && bio->bi_io_vec && 
++		bio->bi_io_vec->bv_page && 
++	    (bio->bi_io_vec->bv_page->mapping || bio->bi_dio_inode)) {
++		struct inode *inode;
++		struct dentry *dentry;
++		struct hlist_head *h;
++		char* res;
++		char buf[128]= {0,};
++
++		gbrt.bitr.device_from = r.device_from;
++		gbrt.bitr.device_to = r.device_to;
++		gbrt.bitr.sector_from = r.sector_from;
++
++		memset(gbrt.name, 0, sizeof(gbrt.name) / sizeof(unsigned char));
++
++		if (bio->bi_io_vec->bv_page->mapping->host || bio->bi_dio_inode) {
++			inode = bio->bi_io_vec->bv_page->mapping->host ? 
++					bio->bi_io_vec->bv_page->mapping->host : bio->bi_dio_inode;
++			if (inode) {
++				gbrt.ino = inode->i_ino;
++				if (inode->i_ino == 0) {
++					strncpy(gbrt.name, "MEAT", 128);
++				} else if (inode->i_dentry.first) {
++					h = &inode->i_dentry;
++					hlist_for_each_entry(dentry, h, d_u.d_alias) {
++						res = dentry_path_raw(dentry, buf, 128);
++						if (IS_ERR(res)) {
++
++						} else {
++							strncpy(gbrt.name, res, 128);
++							
++						}		
++					}
++				} else {
++
++				}
++			}	
++			printk (KERN_ERR "chenwei file: %s %lu\n", gbrt.name, gbrt.ino);
++		}
++
++		__blk_add_trace(bt, bio->bi_iter.bi_sector, bio->bi_iter.bi_size,
++				bio->bi_rw, BLK_TA_REMAP,
++				!bio_flagged(bio, BIO_UPTODATE), sizeof(gbrt), &gbrt, tsk);
++	}	
++#else
++
+ 	__blk_add_trace(bt, bio->bi_iter.bi_sector, bio->bi_iter.bi_size,
+ 			bio->bi_rw, BLK_TA_REMAP,
+ 			!bio_flagged(bio, BIO_UPTODATE), sizeof(r), &r, tsk);
++#endif
++
+ }
+ 
+ /**
+@@ -1183,6 +1242,9 @@ static __u64 get_pdu_int(const struct trace_entry *ent)
+ 	return be64_to_cpu(*val);
+ }
+ 
++#ifdef CONFIG_MOST
++
++#else
+ static void get_pdu_remap(const struct trace_entry *ent,
+ 			  struct blk_io_trace_remap *r)
+ {
+@@ -1193,6 +1255,7 @@ static void get_pdu_remap(const struct trace_entry *ent,
+ 	r->device_to   = be32_to_cpu(__r->device_to);
+ 	r->sector_from = be64_to_cpu(sector_from);
+ }
++#endif
+ 
+ typedef int (blk_log_action_t) (struct trace_iterator *iter, const char *act);
+ 
+@@ -1307,6 +1370,26 @@ static int blk_log_with_error(struct trace_seq *s,
+ 
+ static int blk_log_remap(struct trace_seq *s, const struct trace_entry *ent)
+ {
++#ifdef CONFIG_MOST
++	struct blk_remap_table brt = { .bitr.device_from = 0, };
++
++	const struct blk_remap_table *__r = pdu_start(ent);
++	__u64 sector_from = __r->bitr.sector_from;
++	unsigned long ino = __r->ino;
++
++	brt.bitr.device_from = be32_to_cpu(__r->bitr.device_from);
++	brt.bitr.device_to   = be32_to_cpu(__r->bitr.device_to);
++	brt.bitr.sector_from = be64_to_cpu(sector_from);
++	brt.ino = ino;
++
++	printk(KERN_ERR "chenwei %lu %lu %lu %s, ", sizeof(brt), brt.ino, ino, __r->name);
++	
++	return trace_seq_printf(s, "%llu + %u <- (%d,%d) %llu %lu %s\n",
++				t_sector(ent), t_sec(ent),
++				MAJOR(brt.bitr.device_from), MINOR(brt.bitr.device_from),
++				(unsigned long long)brt.bitr.sector_from, brt.ino, __r->name);
++
++#else
+ 	struct blk_io_trace_remap r = { .device_from = 0, };
+ 
+ 	get_pdu_remap(ent, &r);
+@@ -1314,6 +1397,7 @@ static int blk_log_remap(struct trace_seq *s, const struct trace_entry *ent)
+ 				t_sector(ent), t_sec(ent),
+ 				MAJOR(r.device_from), MINOR(r.device_from),
+ 				(unsigned long long)r.sector_from);
++#endif
+ }
+ 
+ static int blk_log_plug(struct trace_seq *s, const struct trace_entry *ent)
